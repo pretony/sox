@@ -1,3 +1,8 @@
+修改SoX使之支持stream方式输入输出，并可以设置输入和输出的max buffer size.
+目前只支持Linux.
+上层调用[audio-effect](https://github.com/pretony/audio-effect)
+------------------------------------------------------------------------
+
 SoX
 ---
 

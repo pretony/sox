@@ -19,7 +19,7 @@
  */
 
 #include "sox_i.h"
-
+#include "ringbuf.h"
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -1289,4 +1289,230 @@ sox_format_handler_t const * sox_find_format(char const * name0, sox_bool no_dev
   if (sox_format_init() == SOX_SUCCESS)   /* Try again with plugins */
     return sox_find_format(name0, no_dev);
   return NULL;
+}
+
+
+
+/* stream API */
+static sox_format_t * open_read_stream(
+    ringbuf_t                rb,
+    pthread_mutex_t          *mutex,
+    pthread_cond_t           *cond_P,
+    pthread_cond_t           *cond_C,
+    int                      *input_end,
+    int                      *cmd,
+    DSDTYPE_t                dsdtype,
+    sox_signalinfo_t   const * signal,
+    sox_encodinginfo_t const * encoding,
+    char               const * filetype)
+{
+  sox_format_t * ft = lsx_calloc(1, sizeof(*ft));
+  sox_format_handler_t const * handler;
+  char const * const io_types[] = {"file", "pipe", "file URL"};
+  char const * type = "";
+  size_t   input_bufsiz = sox_globals.input_bufsiz?
+      sox_globals.input_bufsiz : sox_globals.bufsiz;
+
+  if (filetype) {
+    if (!(handler = sox_find_format(filetype, sox_false))) {
+      lsx_fail("no handler for given file type `%s'", filetype);
+      goto error;
+    }
+    ft->handler = *handler;
+  }
+
+  if (!ft->handler.startread && !ft->handler.read) {
+    lsx_fail("file type `%s' isn't readable", filetype);
+    goto error;
+  }
+
+  ft->mode = 'r';
+  ft->filetype = lsx_strdup(filetype);
+  ft->filename = lsx_strdup("");
+
+  if (signal)
+    ft->signal = *signal;
+
+  if (encoding)
+    ft->encoding = *encoding;
+  else sox_init_encodinginfo(&ft->encoding);
+  set_endiannesses(ft);
+
+  if ((ft->handler.flags & SOX_FILE_DEVICE) && !(ft->handler.flags & SOX_FILE_PHONY))
+    lsx_set_signal_defaults(ft);
+
+  ft->priv = lsx_calloc(1, ft->handler.priv_size);
+  /* Read and write starters can change their formats. */
+  if (ft->handler.startread && (*ft->handler.startread)(ft) != SOX_SUCCESS) {
+    lsx_fail("can't open input %s : %s", type, ft->sox_errstr);
+    goto error;
+  }
+
+  /* Fill in some defaults: */
+  if (sox_precision(ft->encoding.encoding, ft->encoding.bits_per_sample))
+    ft->signal.precision = sox_precision(ft->encoding.encoding, ft->encoding.bits_per_sample);
+  if (!(ft->handler.flags & SOX_FILE_PHONY) && !ft->signal.channels)
+    ft->signal.channels = 1;
+
+  if (sox_checkformat(ft) != SOX_SUCCESS) {
+    lsx_fail("bad input format for %s: %s", type, ft->sox_errstr);
+    goto error;
+  }
+
+  if (signal) {
+    if (signal->rate && signal->rate != ft->signal.rate)
+      lsx_warn("can't set sample rate %g; using %g", signal->rate, ft->signal.rate);
+    if (signal->channels && signal->channels != ft->signal.channels)
+      lsx_warn("can't set %u channels; using %u", signal->channels, ft->signal.channels);
+  }
+
+  ft->rb = rb;
+  ft->mutex = mutex;
+  ft->cond_P = cond_P;
+  ft->cond_C = cond_C;
+  ft->input_end = input_end;
+  ft->cmd = cmd;
+  ft->dsdtype = dsdtype;
+  return ft;
+
+error:
+  free(ft->priv);
+  free(ft->filename);
+  free(ft->filetype);
+  free(ft);
+  return NULL;
+}
+
+sox_format_t * sox_open_read_stream(
+    void                     *_rb,
+    pthread_mutex_t          *mutex,
+    pthread_cond_t           *cond_P,
+    pthread_cond_t           *cond_C,
+    int                      *input_end,
+    int                      *cmd,
+    DSDTYPE_t                dsdtype,
+    sox_signalinfo_t   const * signal,
+    sox_encodinginfo_t const * encoding,
+    char               const * filetype)
+{
+  ringbuf_t rb = (ringbuf_t)_rb;
+  return open_read_stream(rb, mutex, cond_P, cond_C, input_end, cmd, dsdtype, signal, encoding, filetype);
+}
+
+sox_format_handler_t const * sox_write_handler_stream(
+    char               const * filetype,
+    char               const * * filetype1)
+{
+  sox_format_handler_t const * handler;
+
+  if (!(handler = sox_find_format(filetype, sox_false))) {
+    if (filetype1)
+      lsx_fail("no handler for given file type `%s'", filetype);
+    return NULL;
+  }
+
+  if (!handler->startwrite && !handler->write) {
+    if (filetype1)
+      lsx_fail("file type `%s' isn't writable", filetype);
+    return NULL;
+  }
+  if (filetype1)
+    *filetype1 = filetype;
+  return handler;
+}
+
+static sox_format_t * open_write_stream(
+    ringbuf_t                rb,
+    pthread_mutex_t          *mutex,
+    pthread_cond_t           *cond_P,
+    pthread_cond_t           *cond_C,
+    int                      *cmd,
+    DSDTYPE_t                dsdtype,
+    sox_signalinfo_t   const * signal,
+    sox_encodinginfo_t const * encoding,
+    char               const * filetype)
+{
+  sox_format_t * ft = lsx_calloc(sizeof(*ft), 1);
+  sox_format_handler_t const * handler;
+
+  if (!signal) {
+    lsx_fail("must specify signal parameters to write file");
+    goto error;
+  }
+
+  if (!(handler = sox_write_handler_stream(filetype, &filetype)))
+    goto error;
+
+  ft->handler = *handler;
+
+  ft->mode = 'w';
+  ft->filetype = lsx_strdup(filetype);
+  ft->filename = lsx_strdup("");
+
+  ft->signal = *signal;
+
+  if (encoding)
+    ft->encoding = *encoding;
+  else sox_init_encodinginfo(&ft->encoding);
+  set_endiannesses(ft);
+
+  set_output_format(ft);
+
+  /* FIXME: doesn't cover the situation where
+   * codec changes audio length due to block alignment (e.g. 8svx, gsm): */
+  if (signal->rate && signal->channels)
+    ft->signal.length = ft->signal.length * ft->signal.rate / signal->rate *
+      ft->signal.channels / signal->channels + .5;
+
+  if ((ft->handler.flags & SOX_FILE_REWIND) && strcmp(ft->filetype, "sox") && !ft->signal.length && !ft->seekable)
+    lsx_warn("can't seek in output file `%s'; length in file header will be unspecified", ft->filename);
+
+  ft->priv = lsx_calloc(1, ft->handler.priv_size);
+  /* Read and write starters can change their formats. */
+  if (ft->handler.startwrite && (ft->handler.startwrite)(ft) != SOX_SUCCESS){
+    lsx_fail("can't open output file: %s", ft->sox_errstr);
+    goto error;
+  }
+
+  if (sox_checkformat(ft) != SOX_SUCCESS) {
+    lsx_fail("bad format for output file: %s", ft->sox_errstr);
+    goto error;
+  }
+
+  if ((ft->handler.flags & SOX_FILE_DEVICE) && signal) {
+    if (signal->rate && signal->rate != ft->signal.rate)
+      lsx_report("can't set sample rate %g; using %g", signal->rate, ft->signal.rate);
+    if (signal->channels && signal->channels != ft->signal.channels)
+      lsx_report("can't set %u channels; using %u", signal->channels, ft->signal.channels);
+  }
+
+  ft->rb = rb;
+  ft->mutex = mutex;
+  ft->cond_P = cond_P;
+  ft->cond_C = cond_C;
+  ft->cmd = cmd;
+  ft->dsdtype = dsdtype;
+  return ft;
+
+error:
+  free(ft->priv);
+  free(ft->filename);
+  free(ft->filetype);
+  free(ft);
+  return NULL;
+}
+
+sox_format_t * sox_open_write_stream(
+    void                     *_rb,
+    pthread_mutex_t          *mutex,
+    pthread_cond_t           *cond_P,
+    pthread_cond_t           *cond_C,
+    int                      *cmd,
+    DSDTYPE_t                dsdtype,
+    sox_signalinfo_t   const * signal,
+    sox_encodinginfo_t const * encoding,
+    char               const * filetype)
+{
+  ringbuf_t rb = (ringbuf_t)_rb;
+  return open_write_stream(rb, mutex, cond_P, cond_C, cmd, dsdtype, signal, encoding, filetype);
 }

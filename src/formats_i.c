@@ -19,9 +19,43 @@
  */
 
 #include "sox_i.h"
+#include "ringbuf.h"
 #include <string.h>
 #include <sys/stat.h>
 #include <stdarg.h>
+
+size_t lsx_read_stream_buf(sox_format_t * ft, void *buf, size_t len)
+{
+    if(*(ft->cmd) != 0) {
+        return 0;
+    }
+    pthread_mutex_lock(ft->mutex);
+    while((ringbuf_bytes_used(ft->rb) < len) && (*(ft->input_end) == 0) && (*(ft->cmd) == 0)) {
+        pthread_cond_wait(ft->cond_C, ft->mutex);
+    }
+    size_t rc_size = ringbuf_bytes_used(ft->rb) < len ? ringbuf_bytes_used(ft->rb) : len;
+
+    ringbuf_memcpy_from(buf, ft->rb, rc_size);
+    pthread_cond_signal(ft->cond_P);
+    pthread_mutex_unlock(ft->mutex);
+    return rc_size;
+}
+
+size_t lsx_write_stream_buf(sox_format_t * ft, void *buf, size_t len)
+{
+    if(*(ft->cmd) != 0) {
+        return 0;
+    }
+    pthread_mutex_lock(ft->mutex);
+    while(((ringbuf_bytes_used(ft->rb) + len) > (ringbuf_buffer_size(ft->rb) - 1)) && (*(ft->cmd) == 0)) {
+        pthread_cond_wait(ft->cond_P, ft->mutex);
+    }
+
+    ringbuf_memcpy_into(ft->rb, buf, len);
+    pthread_cond_signal(ft->cond_C);
+    pthread_mutex_unlock(ft->mutex);
+    return len;
+}
 
 void lsx_fail_errno(sox_format_t * ft, int sox_errno, const char *fmt, ...)
 {
@@ -346,7 +380,7 @@ static uint8_t const cswap[256] = {
       sox_format_t * ft, ctype *buf, size_t len) \
   { \
     size_t n, nread; \
-    nread = lsx_readbuf(ft, buf, len * size) / size; \
+    nread = lsx_read_stream_buf(ft, buf, len * size) / size; \
     for (n = 0; n < nread; n++) \
       twiddle(buf[n], type); \
     return nread; \
@@ -365,7 +399,7 @@ static uint8_t const cswap[256] = {
   { \
     size_t n, nread; \
     uint8_t *data = lsx_malloc(size * len); \
-    nread = lsx_readbuf(ft, data, len * size) / size; \
+    nread = lsx_read_stream_buf(ft, data, len * size) / size; \
     for (n = 0; n < nread; n++) \
       buf[n] = sox_unpack ## size(data + n * size); \
     free(data); \
@@ -418,7 +452,7 @@ int lsx_readchars(sox_format_t * ft, char * chars, size_t len)
     size_t n, nwritten; \
     for (n = 0; n < len; n++) \
       twiddle(buf[n], type); \
-    nwritten = lsx_writebuf(ft, buf, len * size); \
+    nwritten = lsx_write_stream_buf(ft, buf, len * size); \
     return nwritten / size; \
   }
 
@@ -438,7 +472,7 @@ int lsx_readchars(sox_format_t * ft, char * chars, size_t len)
     uint8_t *data = lsx_malloc(size * len); \
     for (n = 0; n < len; n++) \
       sox_pack ## size(data + n * size, buf[n]); \
-    nwritten = lsx_writebuf(ft, data, len * size); \
+    nwritten = lsx_write_stream_buf(ft, data, len * size); \
     free(data); \
     return nwritten / size; \
   }

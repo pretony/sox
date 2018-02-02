@@ -22,6 +22,9 @@ LSX_ and lsx_ symbols should not be used by libSoX-based applications.
 #include <limits.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <sys/types.h>
+#include <stdint.h>
+#include <pthread.h>
 
 #if defined(__cplusplus)
 extern "C" {
@@ -523,6 +526,15 @@ typedef char * * sox_comments_t;
 /*****************************************************************************
 Enumerations:
 *****************************************************************************/
+/**
+ * DSD TYPE:
+ */
+typedef enum DSDTYPE_e
+{
+    DSDTYPE_UNKNOWN = 0,    /**< unknown */
+    DSDTYPE_DSF,            /**< dsf file */
+    DSDTYPE_DFF             /**< dff file */
+}DSDTYPE_t;
 
 /**
 Client API:
@@ -1570,6 +1582,13 @@ struct sox_format_t {
   int              sox_errno;       /**< Failure error code */
   char             sox_errstr[256]; /**< Failure error text */
   void             * fp;            /**< File stream pointer */
+  void             *rb;             /**< ring buffer stream pointer */
+  pthread_mutex_t  *mutex;          /**< ring buffer stream pthread mutex */
+  pthread_cond_t   *cond_P;         /**< ring buffer stream pthread condition for produce*/
+  pthread_cond_t   *cond_C;         /**< ring buffer stream pthread condition for consume */
+  int              *input_end;      /**< the ring input stream buffer is not produce anymore */
+  int              *cmd;            /**< is called stop */
+  DSDTYPE_t         dsdtype;        /**< dsd file type */
   lsx_io_type      io_type;         /**< Stores whether this is a file, pipe or URL */
   sox_uint64_t     tell_off;        /**< Current offset within file */
   sox_uint64_t     data_start;      /**< Offset at which headers end and sound data begins (set by lsx_check_read_params) */
@@ -1890,6 +1909,27 @@ sox_open_mem_read(
 
 /**
 Client API:
+Opens a decoding session for a stream memory buffer. Returned handle must be closed with sox_close().
+@returns The handle for the new session, or null on failure.
+*/
+LSX_RETURN_OPT
+sox_format_t *
+LSX_API
+sox_open_read_stream(
+    LSX_PARAM_IN_Z   void                       *rb,       /**< Pointer to audio data stream memory buffer (required). */
+    LSX_PARAM_IN_Z   pthread_mutex_t            *mutex,    /**< pthread mutex for rb. */
+    LSX_PARAM_IN_Z   pthread_cond_t             *cond_P,   /**< pthread produce condition for rb. */
+    LSX_PARAM_IN_Z   pthread_cond_t             *cond_C,   /**< pthread consume condition for rb. */
+    LSX_PARAM_IN_Z   int                        *input_end,/**< is input stream eof. */
+    LSX_PARAM_IN_Z   int                        *cmd,      /**< is called stop. */
+    LSX_PARAM_IN_Z   DSDTYPE_t                  dsdtype,   /**< dsd file type */
+    LSX_PARAM_IN_OPT sox_signalinfo_t   const * signal,    /**< Information already known about audio stream, or NULL if none. */
+    LSX_PARAM_IN_OPT sox_encodinginfo_t const * encoding,  /**< Information already known about sample encoding, or NULL if none. */
+    LSX_PARAM_IN_OPT_Z char             const * filetype   /**< Previously-determined file type, or NULL to auto-detect. */
+    );
+
+/**
+Client API:
 Returns true if the format handler for the specified file type supports the specified encoding.
 @returns true if the format handler for the specified file type supports the specified encoding.
 */
@@ -1911,6 +1951,19 @@ sox_format_handler_t const *
 LSX_API
 sox_write_handler(
     LSX_PARAM_IN_OPT_Z char               const * path,         /**< Path to file (required if filetype is NULL). */
+    LSX_PARAM_IN_OPT_Z char               const * filetype,     /**< Filetype for which handler is needed, or NULL to use extension from path. */
+    LSX_PARAM_OUT_OPT  char               const * * filetype1   /**< Receives the filetype that was detected. Pass NULL if not needed. */
+    );
+
+/**
+Client API:
+Gets the format handler for stream memory buffer.
+@returns The found format handler, or null if not found.
+*/
+LSX_RETURN_OPT
+sox_format_handler_t const *
+LSX_API
+sox_write_handler_stream(
     LSX_PARAM_IN_OPT_Z char               const * filetype,     /**< Filetype for which handler is needed, or NULL to use extension from path. */
     LSX_PARAM_OUT_OPT  char               const * * filetype1   /**< Receives the filetype that was detected. Pass NULL if not needed. */
     );
@@ -1964,6 +2017,26 @@ sox_open_memstream_write(
     LSX_PARAM_IN_OPT   sox_encodinginfo_t const * encoding,        /**< Information about desired sample encoding, or NULL to use defaults. */
     LSX_PARAM_IN_OPT_Z char               const * filetype,        /**< Previously-determined file type, or NULL to auto-detect. */
     LSX_PARAM_IN_OPT   sox_oob_t          const * oob              /**< Out-of-band data to add to file, or NULL if none. */
+    );
+
+/**
+Client API:
+Opens an encoding session for stream memory buffer. Returned handle must be closed with sox_close().
+@returns The new session handle, or null on failure.
+*/
+LSX_RETURN_OPT
+sox_format_t *
+LSX_API
+sox_open_write_stream(
+    LSX_PARAM_OUT     void                       *rb,       /**< stream memory buffer to be written (required). */
+    LSX_PARAM_IN      pthread_mutex_t            *mutex,    /**< pthread mutex for rb. */
+    LSX_PARAM_IN      pthread_cond_t             *cond_P,   /**< pthread produce condition for rb. */
+    LSX_PARAM_IN      pthread_cond_t             *cond_C,   /**< pthread consume condition for rb. */
+    LSX_PARAM_IN      int                        *cmd,      /**< is called stop. */
+    LSX_PARAM_IN      DSDTYPE_t                  dsdtype,   /**< dsd file type */
+    LSX_PARAM_IN       sox_signalinfo_t   const * signal,   /**< Information about desired audio stream (required). */
+    LSX_PARAM_IN_OPT   sox_encodinginfo_t const * encoding, /**< Information about desired sample encoding, or NULL to use defaults. */
+    LSX_PARAM_IN_OPT_Z char               const * filetype  /**< Previously-determined file type, or NULL to auto-detect. */
     );
 
 /**

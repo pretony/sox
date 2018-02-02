@@ -28,6 +28,7 @@
   FORMAT(dat)
   FORMAT(dsdiff)
   FORMAT(dsf)
+  FORMAT(dsd_stream)
   FORMAT(dvms)
   FORMAT(f4)
   FORMAT(f8)
